@@ -14,6 +14,30 @@ import Observation
 @MainActor
 @Observable
 final class CoreState {
+    // MARK: - Types
+
+    /// The page one tab's surfaces read, observed on that tab alone: a page's
+    /// live state notifies the readers of its tab instead of every reader of
+    /// every page.
+    @MainActor
+    @Observable
+    fileprivate final class TabPageSlot: BrowserStoreFirstObservable {
+        var page: PageStateModel? {
+            get {
+                access(keyPath: \.page)
+                return pageStorage
+            }
+            set {
+                guard pageStorage !== newValue else { return }
+                pageStorage = newValue
+                withMutation(keyPath: \.page) {}
+            }
+        }
+        @ObservationIgnored private var pageStorage: PageStateModel?
+
+        init() {}
+    }
+
     // MARK: - Variables
 
     /// Each workspace attached to this device, by workspace. The dictionary
@@ -37,6 +61,14 @@ final class CoreState {
     /// page opens or goes, so a page's new title redraws only its readers.
     var pages: [UUID: PageStateModel] { observed(\.pagesStorage, as: \.pages) }
     @ObservationIgnored var pagesStorage: [UUID: PageStateModel] = [:]
+    /// The page each tab shows, by tab, so a tab's surfaces read their own page
+    /// instead of searching every page. Each slot is observed on its own. A
+    /// slot is made the first time a tab asks for its page, so the reader
+    /// hears of the page that arrives later.
+    @ObservationIgnored private var tabPages: [UUID: TabPageSlot] = [:]
+    /// The tab each open page shows, by page, so a page a change gives another
+    /// tab leaves the slot it was read from.
+    @ObservationIgnored private var pageTabs: [UUID: UUID] = [:]
     /// The engines this device registered, with what each supports and which
     /// one new pages open on, as the core last published them. Nil until an
     /// engine registers.
@@ -173,6 +205,66 @@ final class CoreState {
         observed(\.spaceAccessStorage, as: \.spaceAccess)
     }
     @ObservationIgnored var spaceAccessStorage: [BrowserSpaceRuntimeAssignment: SpaceLockChanged] = [:]
+
+    // MARK: - Actions - Pages
+
+    /// The page tab `tabID` shows, observed through that tab alone. Nil while
+    /// the tab has no page or its page keeps no engine page, such as one that
+    /// failed to open.
+    func page(ofTab tabID: UUID) -> PageStateModel? {
+        guard let page = slot(forTab: tabID).page, page.phase.holdsEnginePage else { return nil }
+        return page
+    }
+
+    /// Takes the page the core just opened into the pages map, and points the
+    /// slot of the tab the page shows at it.
+    func pageOpened(_ page: PageStateModel) {
+        publish(page, forKey: page.id, into: \.pagesStorage, as: \.pages)
+        move(page, toTab: page.tabID)
+    }
+
+    /// Takes the core's next values for a page it already holds, and moves the
+    /// page's slot when the change gives the page another tab.
+    func pageChanged(_ page: PageState) {
+        guard let held = pagesStorage[page.id] else { return }
+        held.update(page)
+        move(held, toTab: held.tabID)
+    }
+
+    /// Forgets a page the core removed, and the slot of the tab that showed
+    /// it. A slot another page took over keeps that page.
+    func pageRemoved(_ pageID: UUID) {
+        let removed = pagesStorage[pageID]
+        publish(nil, forKey: pageID, into: \.pagesStorage, as: \.pages)
+        guard let tabID = pageTabs.removeValue(forKey: pageID) else { return }
+        guard let removed, tabPages[tabID]?.page === removed else { return }
+        tabPages[tabID]?.page = nil
+    }
+
+    /// The slot tab `tabID` reads, made when the tab first asks for its page
+    /// so its readers observe the page that arrives later.
+    private func slot(forTab tabID: UUID) -> TabPageSlot {
+        if let held = tabPages[tabID] { return held }
+        let slot = TabPageSlot()
+        tabPages[tabID] = slot
+        return slot
+    }
+
+    /// Points the slot of `tabID` at `page`, clearing the slot of the tab the
+    /// page showed before a change gave it another.
+    private func move(_ page: PageStateModel, toTab tabID: UUID?) {
+        if let previous = pageTabs[page.id], previous != tabID,
+            tabPages[previous]?.page === page
+        {
+            tabPages[previous]?.page = nil
+        }
+        guard let tabID else {
+            pageTabs.removeValue(forKey: page.id)
+            return
+        }
+        pageTabs[page.id] = tabID
+        slot(forTab: tabID).page = page
+    }
 }
 
 extension CoreState: BrowserStoreFirstObservable {}

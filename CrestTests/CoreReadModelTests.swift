@@ -177,6 +177,45 @@ final class CoreReadModelTests: XCTestCase {
             })
     }
 
+    /// A tab reads the page it shows through its own slot: the page the core
+    /// opens for it, one a change gives another tab, and one that goes. A page
+    /// that keeps no engine page answers none, as the search the slot replaces
+    /// did.
+    func testATabReadsThePageItShowsThroughItsOwnSlot() {
+        let state = CoreState()
+        let workspaceID = UUID()
+        let spaceID = UUID()
+        let firstTab = UUID()
+        let secondTab = UUID()
+        let pageID = UUID()
+        func page(_ tabID: UUID?, _ phase: PagePhase = .live) -> PageState {
+            PageState(
+                id: pageID, workspaceID: workspaceID, spaceID: spaceID, tabID: tabID, engine: .webKit,
+                phase: phase, live: .blank)
+        }
+        PageOpened(page: page(firstTab)).apply(to: state)
+        XCTAssertEqual(state.page(ofTab: firstTab)?.id, pageID)
+        XCTAssertNil(state.page(ofTab: secondTab))
+
+        PageChanged(page: page(secondTab)).apply(to: state)
+        XCTAssertNil(state.page(ofTab: firstTab))
+        XCTAssertEqual(state.page(ofTab: secondTab)?.id, pageID)
+
+        PageChanged(page: page(secondTab, .failed)).apply(to: state)
+        XCTAssertNil(state.page(ofTab: secondTab))
+        PageChanged(page: page(secondTab, .live)).apply(to: state)
+        XCTAssertEqual(state.page(ofTab: secondTab)?.id, pageID)
+
+        PageChanged(page: page(nil)).apply(to: state)
+        XCTAssertNil(state.page(ofTab: secondTab))
+        XCTAssertNotNil(state.pages[pageID])
+
+        PageChanged(page: page(secondTab)).apply(to: state)
+        PageRemoved(pageID: pageID).apply(to: state)
+        XCTAssertNil(state.page(ofTab: secondTab))
+        XCTAssertNil(state.pages[pageID])
+    }
+
     // MARK: - Helpers
 
     /// Changes something with `change` and asserts that a reader told of the
